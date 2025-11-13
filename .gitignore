@@ -1,0 +1,18 @@
+# Dependências e ambientes
+venv/
+.venv/
+env/
+.env/
+__pycache__/
+
+# Configurações sensíveis
+.env.local
+.env.*.local
+*.env
+*.key
+*.token
+tokens/
+
+# Arquivos temporários
+.DS_Store
+*.log
