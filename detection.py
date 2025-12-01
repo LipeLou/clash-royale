@@ -1,0 +1,430 @@
+import cv2
+import numpy as np
+import mss
+import time
+import os
+from pathlib import Path
+from typing import Optional, Tuple, Dict
+from dataclasses import dataclass
+
+# Importações do main.py para lógica de jogo
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+from main import ClashRoyaleAPI, Carta, DeckState
+from dotenv import load_dotenv
+
+# ==============================================================================
+# CONFIGURAÇÃO DOS SLOTS (ROI)
+# ==============================================================================
+# Dimensões padrão de uma carta (ajuste conforme size-adjustment.py)
+CARD_WIDTH = 250
+CARD_HEIGHT = 400
+
+# Defina o canto superior esquerdo (Left, Top) para cada um dos 8 slots
+# DICA: Use o Paint para pegar as coordenadas exatas do início de cada carta
+# IMPORTANTE: Você deve ajustar estes valores para a posição real no seu monitor!
+SLOTS_CONFIG = [
+    {"id": 0, "left": 100, "top": 500},  # Slot 0
+    {"id": 1, "left": 400, "top": 500},  # Slot 1
+    {"id": 2, "left": 700, "top": 500},  # Slot 2
+    {"id": 3, "left": 1000, "top": 500}, # Slot 3
+    {"id": 4, "left": 1300, "top": 100}, # Slot 4
+    {"id": 5, "left": 1600, "top": 100}, # Slot 5
+    {"id": 6, "left": 1900, "top": 100}, # Slot 6
+    {"id": 7, "left": 2200, "top": 100}, # Slot 7
+]
+
+# ==============================================================================
+# CALIBRAÇÃO DE COR (Detecção de Fundo Vermelho)
+# ==============================================================================
+# O slot é considerado "VAZIO" se a cor média da região central for avermelhada
+RED_MIN_R = 130  # Mínimo de componente Vermelho (0-255)
+RED_MAX_G = 80   # Máximo de componente Verde (0-255)
+RED_MAX_B = 80   # Máximo de componente Azul (0-255)
+
+# ==============================================================================
+# CONFIGURAÇÃO DE IDENTIFICAÇÃO
+# ==============================================================================
+TEMPLATES_DIR = Path(__file__).parent / "cards" / "cards-templates"
+MATCH_THRESHOLD = 0.75  # Score mínimo para considerar uma correspondência válida
+
+# ==============================================================================
+# CONFIGURAÇÃO DE ELIXIR
+# ==============================================================================
+ELIXIR_INICIAL = 5.0  # Elixir inicial do oponente
+ELIXIR_MAX = 10.0     # Elixir máximo
+ELIXIR_REGENERACAO = 0.7  # Elixir regenerado por segundo (aproximado)
+
+class CardIdentifier:
+    """Identifica cartas comparando imagens com templates usando matchTemplate."""
+    
+    def __init__(self, templates_dir: Path):
+        self.templates_dir = templates_dir
+        self.templates_cache = {}  # Cache de templates carregados
+        self._load_templates()
+    
+    def _load_templates(self):
+        """Carrega todos os templates PNG do diretório."""
+        if not self.templates_dir.exists():
+            print(f"AVISO: Diretório de templates não encontrado: {self.templates_dir}")
+            return
+        
+        png_files = list(self.templates_dir.glob("*.png"))
+        print(f"Carregando {len(png_files)} templates...")
+        
+        for template_path in png_files:
+            try:
+                template_img = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+                if template_img is not None:
+                    # Extrai o nome da carta do nome do arquivo
+                    # Ex: "witch_medium.png" -> "Witch"
+                    nome_arquivo = template_path.stem
+                    # Remove sufixos "_medium" ou "_evolutionMedium"
+                    nome_carta = nome_arquivo.replace("_medium", "").replace("_evolutionMedium", "")
+                    # Converte para formato de nome (primeira letra maiúscula)
+                    nome_carta = nome_carta.replace("-", " ").title()
+                    
+                    # Armazena tanto medium quanto evolutionMedium com o mesmo nome base
+                    if nome_carta not in self.templates_cache:
+                        self.templates_cache[nome_carta] = []
+                    self.templates_cache[nome_carta].append(template_img)
+            except Exception as e:
+                print(f"Erro ao carregar template {template_path.name}: {e}")
+        
+        print(f"Templates carregados: {len(self.templates_cache)} cartas únicas")
+    
+    def identify_card(self, target_img) -> Optional[Tuple[str, float]]:
+        """
+        Identifica a carta na imagem alvo comparando com todos os templates.
+        
+        Retorna: (nome_carta, score) ou None se nenhuma correspondência for encontrada.
+        """
+        if not self.templates_cache:
+            return None
+        
+        best_match = None
+        best_score = 0.0
+        
+        # Compara com todos os templates
+        for nome_carta, templates in self.templates_cache.items():
+            for template in templates:
+                try:
+                    # Redimensiona o template se necessário para corresponder ao alvo
+                    if template.shape[:2] != target_img.shape[:2]:
+                        template_resized = cv2.resize(template, (target_img.shape[1], target_img.shape[0]))
+                    else:
+                        template_resized = template
+                    
+                    # Usa matchTemplate com método TM_CCOEFF_NORMED (retorna 0-1)
+                    result = cv2.matchTemplate(target_img, template_resized, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, _ = cv2.minMaxLoc(result)
+                    
+                    if max_val > best_score:
+                        best_score = max_val
+                        best_match = nome_carta
+                except Exception as e:
+                    # Ignora erros de comparação e continua
+                    continue
+        
+        # Retorna apenas se o score for acima do threshold
+        if best_score >= MATCH_THRESHOLD:
+            return (best_match, best_score)
+        
+        return None
+
+
+@dataclass
+class SlotInfo:
+    """Informações sobre um slot específico."""
+    nome_carta: Optional[str] = None
+    elixir: Optional[int] = None
+    carta_obj: Optional[Carta] = None
+
+
+class GameState:
+    """Gerencia o estado do jogo: elixir, deck identificado, etc."""
+    
+    def __init__(self, api: ClashRoyaleAPI):
+        self.api = api
+        self.elixir_atual = ELIXIR_INICIAL
+        self.ultima_atualizacao_elixir = time.time()
+        
+        # Mapeamento de nome da carta (como aparece na identificação) -> Carta da API
+        self.cartas_cache: Dict[str, Carta] = {}
+        
+        # Informações de cada slot
+        self.slots_info: Dict[int, SlotInfo] = {i: SlotInfo() for i in range(8)}
+        
+        # Deck identificado (lista de 8 cartas conforme identificadas)
+        self.deck_identificado: list[Optional[Carta]] = [None] * 8
+        
+    def normalizar_nome_carta(self, nome_identificado: str) -> str:
+        """
+        Normaliza o nome identificado para corresponder ao formato da API.
+        Ex: "Witch" -> "Witch", "Goblin Barrel" -> "Goblin Barrel"
+        """
+        # Remove espaços extras e capitaliza corretamente
+        nome = nome_identificado.strip()
+        # A API usa nomes como "Goblin Barrel", "Hog Rider", etc.
+        return nome
+    
+    def obter_carta_da_api(self, nome_identificado: str) -> Optional[Carta]:
+        """Busca a carta na API e retorna o objeto Carta."""
+        # Verifica cache primeiro
+        if nome_identificado in self.cartas_cache:
+            return self.cartas_cache[nome_identificado]
+        
+        # Normaliza o nome
+        nome_normalizado = self.normalizar_nome_carta(nome_identificado)
+        
+        try:
+            # Busca na API
+            cartas = self.api.listar_cartas()
+            for carta in cartas:
+                # Comparação case-insensitive
+                if carta.nome.lower() == nome_normalizado.lower():
+                    self.cartas_cache[nome_identificado] = carta
+                    return carta
+        except Exception as e:
+            print(f"Erro ao buscar carta '{nome_identificado}' na API: {e}")
+        
+        return None
+    
+    def registrar_carta_identificada(self, slot_id: int, nome_carta: str):
+        """Registra que uma carta foi identificada em um slot."""
+        carta = self.obter_carta_da_api(nome_carta)
+        
+        if carta:
+            self.slots_info[slot_id].nome_carta = nome_carta
+            self.slots_info[slot_id].elixir = carta.elixir
+            self.slots_info[slot_id].carta_obj = carta
+            self.deck_identificado[slot_id] = carta
+            print(f"[GameState] Slot {slot_id}: {carta.nome} ({carta.elixir} elixir)")
+        else:
+            print(f"[GameState] AVISO: Carta '{nome_carta}' não encontrada na API")
+            self.slots_info[slot_id].nome_carta = nome_carta
+    
+    def registrar_carta_jogada(self, slot_id: int):
+        """Registra que uma carta foi jogada e atualiza o elixir."""
+        slot_info = self.slots_info[slot_id]
+        
+        if slot_info.carta_obj:
+            # Atualiza elixir considerando regeneração desde última atualização
+            agora = time.time()
+            tempo_decorrido = agora - self.ultima_atualizacao_elixir
+            self.elixir_atual = min(ELIXIR_MAX, self.elixir_atual + (ELIXIR_REGENERACAO * tempo_decorrido))
+            
+            # Subtrai o custo da carta jogada
+            self.elixir_atual = max(0, self.elixir_atual - slot_info.carta_obj.elixir)
+            self.ultima_atualizacao_elixir = agora
+            
+            print(f"[GameState] Elixir atualizado: {self.elixir_atual:.1f} (Carta: {slot_info.carta_obj.nome}, Custo: {slot_info.carta_obj.elixir})")
+        else:
+            print(f"[GameState] AVISO: Tentativa de jogar carta desconhecida no slot {slot_id}")
+    
+    def atualizar_elixir_regeneracao(self):
+        """Atualiza o elixir baseado na regeneração natural (chamar periodicamente)."""
+        agora = time.time()
+        tempo_decorrido = agora - self.ultima_atualizacao_elixir
+        self.elixir_atual = min(ELIXIR_MAX, self.elixir_atual + (ELIXIR_REGENERACAO * tempo_decorrido))
+        self.ultima_atualizacao_elixir = agora
+    
+    def get_elixir_atual(self) -> float:
+        """Retorna o elixir atual (atualizado com regeneração)."""
+        self.atualizar_elixir_regeneracao()
+        return self.elixir_atual
+
+
+class GameWatcher:
+    def __init__(self):
+        self.sct = mss.mss()
+        
+        # Monitor 1 é geralmente o principal
+        if len(self.sct.monitors) > 1:
+            self.monitor = self.sct.monitors[1] 
+        else:
+            self.monitor = self.sct.monitors[0]
+
+        # Estado dos slots: "UNKNOWN", "EMPTY", "FULL"
+        self.slots_status = {i: "UNKNOWN" for i in range(len(SLOTS_CONFIG))}
+        
+        # Memória: Qual carta está em cada slot? (Nome da carta ou None)
+        self.slots_identity = {i: None for i in range(len(SLOTS_CONFIG))}
+        
+        # Inicializa o identificador de cartas
+        self.card_identifier = CardIdentifier(TEMPLATES_DIR)
+        
+        # Inicializa API e GameState
+        load_dotenv()
+        token = os.getenv("CR_API_TOKEN")
+        if not token:
+            print("AVISO: CR_API_TOKEN não encontrado. Funcionalidades de elixir desabilitadas.")
+            self.api = None
+            self.game_state = None
+        else:
+            try:
+                self.api = ClashRoyaleAPI(token)
+                self.game_state = GameState(self.api)
+                print("API do Clash Royale conectada com sucesso!")
+            except Exception as e:
+                print(f"AVISO: Erro ao conectar com API: {e}. Funcionalidades de elixir desabilitadas.")
+                self.api = None
+                self.game_state = None
+
+    def capture_screen(self):
+        """Captura a tela inteira."""
+        screenshot = self.sct.grab(self.monitor)
+        img = np.array(screenshot)
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+    def get_slot_roi(self, frame, slot_id):
+        """Recorta a imagem de um slot específico."""
+        cfg = SLOTS_CONFIG[slot_id]
+        x = cfg["left"] - self.monitor["left"]
+        y = cfg["top"] - self.monitor["top"]
+        w = CARD_WIDTH
+        h = CARD_HEIGHT
+        
+        # Garante que não saia da tela
+        if x < 0 or y < 0 or x+w > frame.shape[1] or y+h > frame.shape[0]:
+            return None
+            
+        return frame[y:y+h, x:x+w]
+
+    def is_slot_empty(self, slot_img):
+        """
+        Verifica se o slot está vazio (fundo vermelho).
+        Analisa uma pequena região central para performance e evitar bordas.
+        """
+        h, w, _ = slot_img.shape
+        # Pega um quadrado central (20% do tamanho)
+        center_x, center_y = w // 2, h // 2
+        roi_size = 40
+        
+        # Garante que a ROI esteja dentro da imagem
+        y1 = max(0, center_y - roi_size)
+        y2 = min(h, center_y + roi_size)
+        x1 = max(0, center_x - roi_size)
+        x2 = min(w, center_x + roi_size)
+        
+        center_roi = slot_img[y1:y2, x1:x2]
+        
+        if center_roi.size == 0:
+            return False
+
+        # Calcula a média de cor
+        avg_color = np.mean(center_roi, axis=(0, 1)) # BGR
+        avg_b, avg_g, avg_r = avg_color
+
+        # Critério: Muito vermelho e pouco verde/azul
+        is_red = (avg_r > RED_MIN_R) and (avg_g < RED_MAX_G) and (avg_b < RED_MAX_B)
+        return is_red
+
+    def run(self):
+        print("--- CLASH ROYALE WATCHER INICIADO ---")
+        print(f"Monitorando {len(SLOTS_CONFIG)} slots.")
+        print("IMPORTANTE: Certifique-se de ajustar as coordenadas em SLOTS_CONFIG!")
+        print("Pressione 'q' para sair.")
+
+        while True:
+            frame = self.capture_screen()
+            debug_frame = frame.copy()
+
+            for i in range(len(SLOTS_CONFIG)):
+                slot_img = self.get_slot_roi(frame, i)
+                if slot_img is None:
+                    continue
+
+                # 1. Determinar Estado Atual (Vazio ou Cheio)
+                is_empty = self.is_slot_empty(slot_img)
+                current_state = "EMPTY" if is_empty else "FULL"
+                previous_state = self.slots_status[i]
+
+                # Atualiza status visual no debug
+                cfg = SLOTS_CONFIG[i]
+                x, y = cfg["left"] - self.monitor["left"], cfg["top"] - self.monitor["top"]
+                
+                # Desenha retângulo: Verde (Cheio), Vermelho (Vazio)
+                color = (0, 0, 255) if is_empty else (0, 255, 0) 
+                cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), color, 2)
+                
+                # Texto indicador
+                label = f"S{i}: {self.slots_identity[i] or '?'}"
+                if self.game_state and self.game_state.slots_info[i].elixir:
+                    label += f" ({self.game_state.slots_info[i].elixir}⚡)"
+                cv2.putText(debug_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+                # 2. Lógica de Transição
+                
+                # CASO: Nova carta chegou (Vermelho -> Cheio)
+                if previous_state == "EMPTY" and current_state == "FULL":
+                    print(f"[Slot {i}] Nova carta detectada!")
+                    
+                    # Pequeno delay para garantir que a animação terminou e a carta está parada
+                    # Se necessário, aumente este valor
+                    time.sleep(0.2) 
+                    
+                    # Recaptura atualizada após delay (apenas do slot, se possível, mas mss precisa de grab)
+                    # Para simplificar e garantir sincronia, pegamos um novo frame cheio
+                    frame_updated = self.capture_screen()
+                    slot_img_updated = self.get_slot_roi(frame_updated, i)
+
+                    if self.slots_identity[i] is None:
+                        # Carta desconhecida: Salvar alvo e identificar
+                        cv2.imwrite("alvo.png", slot_img_updated)
+                        print(f"[Slot {i}] Alvo salvo em 'alvo.png' para identificação...")
+                        
+                        # Identifica a carta usando matchTemplate
+                        resultado = self.card_identifier.identify_card(slot_img_updated)
+                        
+                        if resultado:
+                            nome_carta, score = resultado
+                            self.slots_identity[i] = nome_carta
+                            print(f"[Slot {i}] ✓ Carta identificada: {nome_carta} (Score: {score:.3f})")
+                            
+                            # Registra no GameState para obter elixir
+                            if self.game_state:
+                                self.game_state.registrar_carta_identificada(i, nome_carta)
+                        else:
+                            print(f"[Slot {i}] ✗ Não foi possível identificar a carta (Score < {MATCH_THRESHOLD})")
+                    else:
+                        # Carta já conhecida
+                        print(f"[Slot {i}] Identificada por memória: {self.slots_identity[i]}")
+
+                # CASO: Carta jogada (Cheio -> Vermelho)
+                elif previous_state == "FULL" and current_state == "EMPTY":
+                    if self.slots_identity[i]:
+                         print(f"[Slot {i}] Carta JOGADA: {self.slots_identity[i]}")
+                         # Atualiza elixir no GameState
+                         if self.game_state:
+                             self.game_state.registrar_carta_jogada(i)
+                    else:
+                         print(f"[Slot {i}] Carta jogada (Ainda não identificada)")
+
+                # Atualiza estado
+                self.slots_status[i] = current_state
+
+            # Visualização Debug (Redimensionada)
+            try:
+                scale = 0.5
+                dim = (int(debug_frame.shape[1] * scale), int(debug_frame.shape[0] * scale))
+                resized = cv2.resize(debug_frame, dim, interpolation=cv2.INTER_AREA)
+                
+                # Adiciona informação de elixir na tela
+                if self.game_state:
+                    elixir = self.game_state.get_elixir_atual()
+                    elixir_text = f"Elixir: {elixir:.1f}"
+                    cv2.putText(resized, elixir_text, (10, resized.shape[0] - 20), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                
+                cv2.imshow("Clash Watcher Debug", resized)
+            except Exception as e:
+                print(f"Erro ao mostrar debug: {e}")
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    GameWatcher().run()
