@@ -17,21 +17,21 @@ from dotenv import load_dotenv
 # CONFIGURAÇÃO DOS SLOTS (ROI)
 # ==============================================================================
 # Dimensões padrão de uma carta (ajuste conforme size-adjustment.py)
-CARD_WIDTH = 250
-CARD_HEIGHT = 400
+CARD_WIDTH = 61
+CARD_HEIGHT = 90
 
 # Defina o canto superior esquerdo (Left, Top) para cada um dos 8 slots
 # DICA: Use o Paint para pegar as coordenadas exatas do início de cada carta
 # IMPORTANTE: Você deve ajustar estes valores para a posição real no seu monitor!
 SLOTS_CONFIG = [
-    {"id": 0, "left": 100, "top": 500},  # Slot 0
-    {"id": 1, "left": 400, "top": 500},  # Slot 1
-    {"id": 2, "left": 700, "top": 500},  # Slot 2
-    {"id": 3, "left": 1000, "top": 500}, # Slot 3
-    {"id": 4, "left": 1300, "top": 100}, # Slot 4
-    {"id": 5, "left": 1600, "top": 100}, # Slot 5
-    {"id": 6, "left": 1900, "top": 100}, # Slot 6
-    {"id": 7, "left": 2200, "top": 100}, # Slot 7
+    {"id": 0, "left": 731, "top": 58},  # Slot 0
+    {"id": 1, "left": 796, "top": 58},  # Slot 1
+    {"id": 2, "left": 861, "top": 58},  # Slot 2
+    {"id": 3, "left": 926, "top": 58},  # Slot 3
+    {"id": 4, "left": 991, "top": 58},  # Slot 4
+    {"id": 5, "left": 1056, "top": 58},  # Slot 5
+    {"id": 6, "left": 1121, "top": 58},  # Slot 6
+    {"id": 7, "left": 1186, "top": 58},  # Slot 7
 ]
 
 # ==============================================================================
@@ -46,7 +46,7 @@ RED_MAX_B = 80   # Máximo de componente Azul (0-255)
 # CONFIGURAÇÃO DE IDENTIFICAÇÃO
 # ==============================================================================
 TEMPLATES_DIR = Path(__file__).parent / "cards" / "cards-templates"
-MATCH_THRESHOLD = 0.75  # Score mínimo para considerar uma correspondência válida
+MATCH_THRESHOLD = 0.15  # Score mínimo para considerar uma correspondência válida
 
 # ==============================================================================
 # CONFIGURAÇÃO DE ELIXIR
@@ -99,8 +99,18 @@ class CardIdentifier:
         
         Retorna: (nome_carta, score) ou None se nenhuma correspondência for encontrada.
         """
+        best_match, best_score = self.get_best_guess(target_img)
+        
+        # Retorna apenas se o score for acima do threshold
+        if best_score >= MATCH_THRESHOLD:
+            return (best_match, best_score)
+        
+        return None
+
+    def get_best_guess(self, target_img) -> Tuple[Optional[str], float]:
+        """Retorna a melhor correspondência encontrada, independente do threshold."""
         if not self.templates_cache:
-            return None
+            return (None, 0.0)
         
         best_match = None
         best_score = 0.0
@@ -126,11 +136,7 @@ class CardIdentifier:
                     # Ignora erros de comparação e continua
                     continue
         
-        # Retorna apenas se o score for acima do threshold
-        if best_score >= MATCH_THRESHOLD:
-            return (best_match, best_score)
-        
-        return None
+        return (best_match, best_score)
 
 
 @dataclass
@@ -291,40 +297,62 @@ class GameWatcher:
             
         return frame[y:y+h, x:x+w]
 
-    def is_slot_empty(self, slot_img):
+    def get_slot_saturation(self, slot_img):
         """
-        Verifica se o slot está vazio (fundo vermelho).
-        Analisa uma pequena região central para performance e evitar bordas.
+        Calcula a saturação média da imagem do slot.
+        Cartas reais são coloridas (alta saturação).
+        Cartas '?' ou fundo vazio costumam ser menos saturadas.
         """
+        hsv = cv2.cvtColor(slot_img, cv2.COLOR_BGR2HSV)
+        saturation = hsv[:, :, 1] # Canal S
+        return np.mean(saturation)
+
+    def hex_to_bgr(self, hex_color):
+        """Converte cor Hex (#RRGGBB) para BGR (formato OpenCV)."""
+        hex_color = hex_color.lstrip('#')
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return (b, g, r)
+
+    def is_background_red(self, slot_img):
+        """
+        Verifica se o slot corresponde às cores do fundo vermelho (quando a carta é jogada).
+        Usa uma tolerância baseada nas cores fornecidas.
+        """
+        # Cores de referência fornecidas
+        red_colors_hex = ["#92463a", "#843c32", "#9c4c3c", "#8c3c34", "#7c342c"]
+        red_colors_bgr = [self.hex_to_bgr(c) for c in red_colors_hex]
+        
+        # Calcula a média de cor do slot (região central)
         h, w, _ = slot_img.shape
-        # Pega um quadrado central (20% do tamanho)
-        center_x, center_y = w // 2, h // 2
         roi_size = 40
+        center_roi = slot_img[max(0, h//2 - roi_size):min(h, h//2 + roi_size), 
+                              max(0, w//2 - roi_size):min(w, w//2 + roi_size)]
         
-        # Garante que a ROI esteja dentro da imagem
-        y1 = max(0, center_y - roi_size)
-        y2 = min(h, center_y + roi_size)
-        x1 = max(0, center_x - roi_size)
-        x2 = min(w, center_x + roi_size)
+        if center_roi.size == 0: return False
         
-        center_roi = slot_img[y1:y2, x1:x2]
-        
-        if center_roi.size == 0:
-            return False
-
-        # Calcula a média de cor
         avg_color = np.mean(center_roi, axis=(0, 1)) # BGR
-        avg_b, avg_g, avg_r = avg_color
-
-        # Critério: Muito vermelho e pouco verde/azul
-        is_red = (avg_r > RED_MIN_R) and (avg_g < RED_MAX_G) and (avg_b < RED_MAX_B)
-        return is_red
+        
+        # Verifica se a cor média está próxima de ALGUMA das cores de referência
+        # Tolerância euclidiana
+        TOLERANCE = 25.0 
+        
+        for ref_color in red_colors_bgr:
+            dist = np.linalg.norm(avg_color - np.array(ref_color))
+            if dist < TOLERANCE:
+                return True
+                
+        return False
 
     def run(self):
         print("--- CLASH ROYALE WATCHER INICIADO ---")
         print(f"Monitorando {len(SLOTS_CONFIG)} slots.")
         print("IMPORTANTE: Certifique-se de ajustar as coordenadas em SLOTS_CONFIG!")
         print("Pressione 'q' para sair.")
+
+        # Limiar de saturação para considerar CHEIO
+        SATURATION_THRESHOLD = 60 
 
         while True:
             frame = self.capture_screen()
@@ -335,34 +363,52 @@ class GameWatcher:
                 if slot_img is None:
                     continue
 
-                # 1. Determinar Estado Atual (Vazio ou Cheio)
-                is_empty = self.is_slot_empty(slot_img)
-                current_state = "EMPTY" if is_empty else "FULL"
+                # --- NOVA LÓGICA DE ESTADOS MISTOS ---
+                
+                # 1. Checa se é o fundo vermelho específico (Transição/Vazio Flash)
+                is_red_bg = self.is_background_red(slot_img)
+                
+                # 2. Checa Saturação (Carta Colorida vs Carta Cinza/?)
+                sat = self.get_slot_saturation(slot_img)
+                is_saturated = sat > SATURATION_THRESHOLD
+                
+                # Determina o estado
+                if is_red_bg:
+                    current_state = "EMPTY" # Vermelho detectado = Vazio/Jogada
+                elif is_saturated:
+                    current_state = "FULL"  # Colorido e não vermelho = Carta Disponível
+                else:
+                    current_state = "EMPTY" # Baixa saturação (Carta ?) = Indisponível/Vazio
+                
                 previous_state = self.slots_status[i]
 
                 # Atualiza status visual no debug
                 cfg = SLOTS_CONFIG[i]
                 x, y = cfg["left"] - self.monitor["left"], cfg["top"] - self.monitor["top"]
                 
-                # Desenha retângulo: Verde (Cheio), Vermelho (Vazio)
-                color = (0, 0, 255) if is_empty else (0, 255, 0) 
+                # Desenha retângulo
+                color = (0, 255, 0) if current_state == "FULL" else (0, 0, 255)
                 cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), color, 2)
                 
-                # Texto indicador
+                # Texto indicador debug
                 label = f"S{i}: {self.slots_identity[i] or '?'}"
+                label_debug = f"Sat:{int(sat)} Red:{'SIM' if is_red_bg else 'NAO'}"
+                
                 if self.game_state and self.game_state.slots_info[i].elixir:
-                    label += f" ({self.game_state.slots_info[i].elixir}⚡)"
-                cv2.putText(debug_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    label += f" ({self.game_state.slots_info[i].elixir}E)"
+                
+                cv2.putText(debug_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(debug_frame, label_debug, (x, y+CARD_HEIGHT+15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 
                 # 2. Lógica de Transição
                 
-                # CASO: Nova carta chegou (Vermelho -> Cheio)
+                # CASO: Nova carta chegou (Vazio -> Cheio)
                 if previous_state == "EMPTY" and current_state == "FULL":
                     print(f"[Slot {i}] Nova carta detectada!")
                     
                     # Pequeno delay para garantir que a animação terminou e a carta está parada
                     # Se necessário, aumente este valor
-                    time.sleep(0.2) 
+                    time.sleep(1.5) 
                     
                     # Recaptura atualizada após delay (apenas do slot, se possível, mas mss precisa de grab)
                     # Para simplificar e garantir sincronia, pegamos um novo frame cheio
@@ -386,12 +432,14 @@ class GameWatcher:
                             if self.game_state:
                                 self.game_state.registrar_carta_identificada(i, nome_carta)
                         else:
-                            print(f"[Slot {i}] ✗ Não foi possível identificar a carta (Score < {MATCH_THRESHOLD})")
+                            # Tenta pegar o melhor palpite mesmo abaixo do threshold para debug
+                            best_guess, best_score = self.card_identifier.get_best_guess(slot_img_updated)
+                            print(f"[Slot {i}] ✗ Não identificado. Melhor palpite: {best_guess} (Score: {best_score:.3f}) vs Threshold {MATCH_THRESHOLD}")
                     else:
                         # Carta já conhecida
                         print(f"[Slot {i}] Identificada por memória: {self.slots_identity[i]}")
 
-                # CASO: Carta jogada (Cheio -> Vermelho)
+                # CASO: Carta jogada (Cheio -> Vazio)
                 elif previous_state == "FULL" and current_state == "EMPTY":
                     if self.slots_identity[i]:
                          print(f"[Slot {i}] Carta JOGADA: {self.slots_identity[i]}")

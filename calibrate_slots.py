@@ -12,12 +12,13 @@ from pathlib import Path
 # 1. Execute este script enquanto o jogo está aberto
 # 2. Mova o mouse sobre a tela e veja as coordenadas em tempo real
 # 3. Clique no canto superior esquerdo de cada slot (começando pelo Slot 0)
-# 4. Após marcar os 8 slots, pressione 's' para salvar
-# 5. Pressione 'q' para sair sem salvar
+# 4. O slot ficará AMARELO. Pressione ENTER para confirmar ou BACKSPACE para cancelar.
+# 5. Após marcar os 8 slots, pressione 's' para salvar
+# 6. Pressione 'q' para sair sem salvar
 # ==============================================================================
 
-CARD_WIDTH = 250
-CARD_HEIGHT = 400
+CARD_WIDTH = 61
+CARD_HEIGHT = 90
 
 class SlotCalibrator:
     def __init__(self):
@@ -29,7 +30,8 @@ class SlotCalibrator:
         else:
             self.monitor = self.sct.monitors[0]
             
-        self.slots = []  # Lista de coordenadas marcadas
+        self.slots = []  # Lista de coordenadas marcadas e confirmadas
+        self.pending_slot = None # Slot aguardando confirmação
         self.mouse_pos = (0, 0)
         self.window_name = "Calibracao de Slots - Clique nos cantos superiores esquerdos"
         
@@ -44,6 +46,14 @@ class SlotCalibrator:
         if event == cv2.EVENT_MOUSEMOVE:
             self.mouse_pos = (x, y)
         elif event == cv2.EVENT_LBUTTONDOWN:
+            if self.pending_slot is not None:
+                print("AVISO: Confirme ou cancele o slot atual antes de marcar outro!")
+                return
+
+            if len(self.slots) >= 8:
+                print("\nAVISO: Limite de 8 slots atingido! Pressione 's' para salvar ou 'q' para sair.")
+                return
+
             # Converte coordenadas da janela para coordenadas da tela
             scale = 0.5  # Mesmo scale usado na visualização
             real_x = int(x / scale)
@@ -53,12 +63,14 @@ class SlotCalibrator:
             screen_x = self.monitor["left"] + real_x
             screen_y = self.monitor["top"] + real_y
             
-            self.slots.append({
+            # Cria slot temporário
+            self.pending_slot = {
                 "id": len(self.slots),
                 "left": screen_x,
                 "top": screen_y
-            })
-            print(f"Slot {len(self.slots)-1} marcado: left={screen_x}, top={screen_y}")
+            }
+            print(f"\nSlot {len(self.slots)} marcado provisoriamente em ({screen_x}, {screen_y})")
+            print("Pressione ENTER para confirmar ou BACKSPACE para cancelar.")
     
     def run(self):
         print("=" * 60)
@@ -67,9 +79,10 @@ class SlotCalibrator:
         print("\nINSTRUÇÕES:")
         print("1. Mova o mouse para ver as coordenadas em tempo real")
         print("2. Clique no CANTO SUPERIOR ESQUERDO de cada slot")
-        print("3. Marque os 8 slots na ordem (Slot 0, 1, 2, 3, 4, 5, 6, 7)")
-        print("4. Pressione 's' para salvar as coordenadas")
-        print("5. Pressione 'q' para sair")
+        print("3. O slot ficará AMARELO. Confirme com ENTER ou Cancele com BACKSPACE.")
+        print("4. Marque os 8 slots na ordem (Slot 0, 1, 2, 3, 4, 5, 6, 7)")
+        print("5. Pressione 's' para salvar as coordenadas (após confirmar todos)")
+        print("6. Pressione 'q' para sair")
         print("\n" + "=" * 60)
         
         cv2.namedWindow(self.window_name)
@@ -79,13 +92,24 @@ class SlotCalibrator:
             frame = self.capture_screen()
             debug_frame = frame.copy()
             
-            # Desenha retângulos nos slots já marcados
+            # Desenha retângulos nos slots já CONFIRMADOS (Verde)
             for slot in self.slots:
                 x = slot["left"] - self.monitor["left"]
                 y = slot["top"] - self.monitor["top"]
                 cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), (0, 255, 0), 3)
                 cv2.putText(debug_frame, f"Slot {slot['id']}", (x, y-10), 
                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+            # Desenha slot PENDENTE (Amarelo/Azul)
+            if self.pending_slot:
+                slot = self.pending_slot
+                x = slot["left"] - self.monitor["left"]
+                y = slot["top"] - self.monitor["top"]
+                cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), (0, 255, 255), 3)
+                cv2.putText(debug_frame, f"Confirmar?", (x, y-30), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(debug_frame, f"ENTER/BACK", (x, y-10), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
             # Mostra coordenadas do mouse
             scale = 0.5
@@ -111,16 +135,31 @@ class SlotCalibrator:
             cv2.putText(resized, coord_text, (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
+            if self.pending_slot:
+                cv2.putText(resized, "CONFIRME O SLOT (ENTER / BACKSPACE)", (10, 60), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
             cv2.imshow(self.window_name, resized)
             
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 print("\nCalibração cancelada.")
                 break
+            elif key == 13: # ENTER key
+                if self.pending_slot:
+                    self.slots.append(self.pending_slot)
+                    print(f"Slot {self.pending_slot['id']} CONFIRMADO.")
+                    self.pending_slot = None
+            elif key == 8: # BACKSPACE key
+                if self.pending_slot:
+                    print("Slot cancelado. Tente novamente.")
+                    self.pending_slot = None
             elif key == ord('s'):
-                if len(self.slots) == 8:
+                if len(self.slots) == 8 and self.pending_slot is None:
                     self.save_config()
                     break
+                elif self.pending_slot is not None:
+                    print("\nAVISO: Confirme o último slot antes de salvar!")
                 else:
                     print(f"\nAVISO: Você marcou apenas {len(self.slots)} slots. Preciso de 8!")
         
@@ -152,4 +191,3 @@ class SlotCalibrator:
 if __name__ == "__main__":
     calibrator = SlotCalibrator()
     calibrator.run()
-
