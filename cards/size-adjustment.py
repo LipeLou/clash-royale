@@ -8,8 +8,8 @@ from PIL import Image
 # DICA: Use o Paint ou ferramenta de print para medir EXATAMENTE o tamanho (px)
 # que a carta ocupa dentro do slot no seu monitor/screenshot.
 # Exemplo: Se no print o slot tem 82x96 pixels, coloque esses valores aqui.
-LARGURA_DESEJADA = 250  # Ajuste para o valor medido no print
-ALTURA_DESEJADA = 400   # Ajuste para o valor medido no print
+LARGURA_DESEJADA = 61  # Ajuste para o valor medido no print
+ALTURA_DESEJADA = 90   # Ajuste para o valor medido no print
 
 def redimensionar_e_salvar(caminho_imagem: Path, largura: int, altura: int) -> str:
     """
