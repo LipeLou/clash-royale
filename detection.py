@@ -1,11 +1,11 @@
 import cv2
 import numpy as np
-import mss
 import time
 import os
 from pathlib import Path
 from typing import Optional, Tuple, Dict
 from dataclasses import dataclass
+from screen_capture import ScreenCapture
 
 # Importações do main.py para lógica de jogo
 import sys
@@ -243,13 +243,8 @@ class GameState:
 
 class GameWatcher:
     def __init__(self):
-        self.sct = mss.mss()
-        
-        # Monitor 1 é geralmente o principal
-        if len(self.sct.monitors) > 1:
-            self.monitor = self.sct.monitors[1] 
-        else:
-            self.monitor = self.sct.monitors[0]
+        self.capturer = ScreenCapture()
+        self.monitor = self.capturer.get_monitor_info()
 
         # Estado dos slots: "UNKNOWN", "EMPTY", "FULL"
         self.slots_status = {i: "UNKNOWN" for i in range(len(SLOTS_CONFIG))}
@@ -279,9 +274,7 @@ class GameWatcher:
 
     def capture_screen(self):
         """Captura a tela inteira."""
-        screenshot = self.sct.grab(self.monitor)
-        img = np.array(screenshot)
-        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        return self.capturer.grab()
 
     def get_slot_roi(self, frame, slot_id):
         """Recorta a imagem de um slot específico."""
@@ -353,123 +346,143 @@ class GameWatcher:
 
         # Limiar de saturação para considerar CHEIO
         SATURATION_THRESHOLD = 60 
+        
+        consecutive_failures = 0
+        MAX_FAILURES = 5
 
         while True:
-            frame = self.capture_screen()
-            debug_frame = frame.copy()
-
-            for i in range(len(SLOTS_CONFIG)):
-                slot_img = self.get_slot_roi(frame, i)
-                if slot_img is None:
-                    continue
-
-                # --- NOVA LÓGICA DE ESTADOS MISTOS ---
-                
-                # 1. Checa se é o fundo vermelho específico (Transição/Vazio Flash)
-                is_red_bg = self.is_background_red(slot_img)
-                
-                # 2. Checa Saturação (Carta Colorida vs Carta Cinza/?)
-                sat = self.get_slot_saturation(slot_img)
-                is_saturated = sat > SATURATION_THRESHOLD
-                
-                # Determina o estado
-                if is_red_bg:
-                    current_state = "EMPTY" # Vermelho detectado = Vazio/Jogada
-                elif is_saturated:
-                    current_state = "FULL"  # Colorido e não vermelho = Carta Disponível
-                else:
-                    current_state = "EMPTY" # Baixa saturação (Carta ?) = Indisponível/Vazio
-                
-                previous_state = self.slots_status[i]
-
-                # Atualiza status visual no debug
-                cfg = SLOTS_CONFIG[i]
-                x, y = cfg["left"] - self.monitor["left"], cfg["top"] - self.monitor["top"]
-                
-                # Desenha retângulo
-                color = (0, 255, 0) if current_state == "FULL" else (0, 0, 255)
-                cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), color, 2)
-                
-                # Texto indicador debug
-                label = f"S{i}: {self.slots_identity[i] or '?'}"
-                label_debug = f"Sat:{int(sat)} Red:{'SIM' if is_red_bg else 'NAO'}"
-                
-                if self.game_state and self.game_state.slots_info[i].elixir:
-                    label += f" ({self.game_state.slots_info[i].elixir}E)"
-                
-                cv2.putText(debug_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                cv2.putText(debug_frame, label_debug, (x, y+CARD_HEIGHT+15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
-                # 2. Lógica de Transição
-                
-                # CASO: Nova carta chegou (Vazio -> Cheio)
-                if previous_state == "EMPTY" and current_state == "FULL":
-                    print(f"[Slot {i}] Nova carta detectada!")
-                    
-                    # Pequeno delay para garantir que a animação terminou e a carta está parada
-                    # Se necessário, aumente este valor
-                    time.sleep(1.5) 
-                    
-                    # Recaptura atualizada após delay (apenas do slot, se possível, mas mss precisa de grab)
-                    # Para simplificar e garantir sincronia, pegamos um novo frame cheio
-                    frame_updated = self.capture_screen()
-                    slot_img_updated = self.get_slot_roi(frame_updated, i)
-
-                    if self.slots_identity[i] is None:
-                        # Carta desconhecida: Salvar alvo e identificar
-                        cv2.imwrite("alvo.png", slot_img_updated)
-                        print(f"[Slot {i}] Alvo salvo em 'alvo.png' para identificação...")
-                        
-                        # Identifica a carta usando matchTemplate
-                        resultado = self.card_identifier.identify_card(slot_img_updated)
-                        
-                        if resultado:
-                            nome_carta, score = resultado
-                            self.slots_identity[i] = nome_carta
-                            print(f"[Slot {i}] ✓ Carta identificada: {nome_carta} (Score: {score:.3f})")
-                            
-                            # Registra no GameState para obter elixir
-                            if self.game_state:
-                                self.game_state.registrar_carta_identificada(i, nome_carta)
-                        else:
-                            # Tenta pegar o melhor palpite mesmo abaixo do threshold para debug
-                            best_guess, best_score = self.card_identifier.get_best_guess(slot_img_updated)
-                            print(f"[Slot {i}] ✗ Não identificado. Melhor palpite: {best_guess} (Score: {best_score:.3f}) vs Threshold {MATCH_THRESHOLD}")
-                    else:
-                        # Carta já conhecida
-                        print(f"[Slot {i}] Identificada por memória: {self.slots_identity[i]}")
-
-                # CASO: Carta jogada (Cheio -> Vazio)
-                elif previous_state == "FULL" and current_state == "EMPTY":
-                    if self.slots_identity[i]:
-                         print(f"[Slot {i}] Carta JOGADA: {self.slots_identity[i]}")
-                         # Atualiza elixir no GameState
-                         if self.game_state:
-                             self.game_state.registrar_carta_jogada(i)
-                    else:
-                         print(f"[Slot {i}] Carta jogada (Ainda não identificada)")
-
-                # Atualiza estado
-                self.slots_status[i] = current_state
-
-            # Visualização Debug (Redimensionada)
             try:
-                scale = 0.5
-                dim = (int(debug_frame.shape[1] * scale), int(debug_frame.shape[0] * scale))
-                resized = cv2.resize(debug_frame, dim, interpolation=cv2.INTER_AREA)
+                frame = self.capture_screen()
+                if frame is None:
+                    consecutive_failures += 1
+                    print(f"ERRO: Falha ao capturar tela ({consecutive_failures}/{MAX_FAILURES}).")
+                    if consecutive_failures >= MAX_FAILURES:
+                        print("Muitas falhas consecutivas. Encerrando para evitar travamento.")
+                        print("DICA: Instale 'gnome-screenshot' ou use ambiente X11/Windows.")
+                        break
+                    time.sleep(1)
+                    continue
                 
-                # Adiciona informação de elixir na tela
-                if self.game_state:
-                    elixir = self.game_state.get_elixir_atual()
-                    elixir_text = f"Elixir: {elixir:.1f}"
-                    cv2.putText(resized, elixir_text, (10, resized.shape[0] - 20), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                
-                cv2.imshow("Clash Watcher Debug", resized)
-            except Exception as e:
-                print(f"Erro ao mostrar debug: {e}")
+                consecutive_failures = 0
+                debug_frame = frame.copy()
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+                for i in range(len(SLOTS_CONFIG)):
+                    slot_img = self.get_slot_roi(frame, i)
+                    if slot_img is None:
+                        continue
+
+                    # --- NOVA LÓGICA DE ESTADOS MISTOS ---
+                    
+                    # 1. Checa se é o fundo vermelho específico (Transição/Vazio Flash)
+                    is_red_bg = self.is_background_red(slot_img)
+                    
+                    # 2. Checa Saturação (Carta Colorida vs Carta Cinza/?)
+                    sat = self.get_slot_saturation(slot_img)
+                    is_saturated = sat > SATURATION_THRESHOLD
+                    
+                    # Determina o estado
+                    if is_red_bg:
+                        current_state = "EMPTY" # Vermelho detectado = Vazio/Jogada
+                    elif is_saturated:
+                        current_state = "FULL"  # Colorido e não vermelho = Carta Disponível
+                    else:
+                        current_state = "EMPTY" # Baixa saturação (Carta ?) = Indisponível/Vazio
+                    
+                    previous_state = self.slots_status[i]
+
+                    # Atualiza status visual no debug
+                    cfg = SLOTS_CONFIG[i]
+                    x, y = cfg["left"] - self.monitor["left"], cfg["top"] - self.monitor["top"]
+                    
+                    # Desenha retângulo
+                    color = (0, 255, 0) if current_state == "FULL" else (0, 0, 255)
+                    cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), color, 2)
+                    
+                    # Texto indicador debug
+                    label = f"S{i}: {self.slots_identity[i] or '?'}"
+                    label_debug = f"Sat:{int(sat)} Red:{'SIM' if is_red_bg else 'NAO'}"
+                    
+                    if self.game_state and self.game_state.slots_info[i].elixir:
+                        label += f" ({self.game_state.slots_info[i].elixir}E)"
+                    
+                    cv2.putText(debug_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    cv2.putText(debug_frame, label_debug, (x, y+CARD_HEIGHT+15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+                    # 2. Lógica de Transição
+                    
+                    # CASO: Nova carta chegou (Vazio -> Cheio)
+                    if previous_state == "EMPTY" and current_state == "FULL":
+                        print(f"[Slot {i}] Nova carta detectada!")
+                        
+                        # Pequeno delay para garantir que a animação terminou e a carta está parada
+                        # Se necessário, aumente este valor
+                        time.sleep(1.5) 
+                        
+                        # Recaptura atualizada após delay (apenas do slot, se possível, mas mss precisa de grab)
+                        # Para simplificar e garantir sincronia, pegamos um novo frame cheio
+                        frame_updated = self.capture_screen()
+                        if frame_updated is not None:
+                            slot_img_updated = self.get_slot_roi(frame_updated, i)
+
+                            if self.slots_identity[i] is None:
+                                # Carta desconhecida: Salvar alvo e identificar
+                                cv2.imwrite("alvo.png", slot_img_updated)
+                                print(f"[Slot {i}] Alvo salvo em 'alvo.png' para identificação...")
+                                
+                                # Identifica a carta usando matchTemplate
+                                resultado = self.card_identifier.identify_card(slot_img_updated)
+                                
+                                if resultado:
+                                    nome_carta, score = resultado
+                                    self.slots_identity[i] = nome_carta
+                                    print(f"[Slot {i}] ✓ Carta identificada: {nome_carta} (Score: {score:.3f})")
+                                    
+                                    # Registra no GameState para obter elixir
+                                    if self.game_state:
+                                        self.game_state.registrar_carta_identificada(i, nome_carta)
+                                else:
+                                    # Tenta pegar o melhor palpite mesmo abaixo do threshold para debug
+                                    best_guess, best_score = self.card_identifier.get_best_guess(slot_img_updated)
+                                    print(f"[Slot {i}] ✗ Não identificado. Melhor palpite: {best_guess} (Score: {best_score:.3f}) vs Threshold {MATCH_THRESHOLD}")
+                            else:
+                                # Carta já conhecida
+                                print(f"[Slot {i}] Identificada por memória: {self.slots_identity[i]}")
+
+                    # CASO: Carta jogada (Cheio -> Vazio)
+                    elif previous_state == "FULL" and current_state == "EMPTY":
+                        if self.slots_identity[i]:
+                             print(f"[Slot {i}] Carta JOGADA: {self.slots_identity[i]}")
+                             # Atualiza elixir no GameState
+                             if self.game_state:
+                                 self.game_state.registrar_carta_jogada(i)
+                        else:
+                             print(f"[Slot {i}] Carta jogada (Ainda não identificada)")
+
+                    # Atualiza estado
+                    self.slots_status[i] = current_state
+
+                # Visualização Debug (Redimensionada)
+                try:
+                    scale = 0.5
+                    dim = (int(debug_frame.shape[1] * scale), int(debug_frame.shape[0] * scale))
+                    resized = cv2.resize(debug_frame, dim, interpolation=cv2.INTER_AREA)
+                    
+                    # Adiciona informação de elixir na tela
+                    if self.game_state:
+                        elixir = self.game_state.get_elixir_atual()
+                        elixir_text = f"Elixir: {elixir:.1f}"
+                        cv2.putText(resized, elixir_text, (10, resized.shape[0] - 20), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                    
+                    cv2.imshow("Clash Watcher Debug", resized)
+                except Exception as e:
+                    print(f"Erro ao mostrar debug: {e}")
+
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+            except KeyboardInterrupt:
+                print("\nInterrompido pelo usuário.")
                 break
 
         cv2.destroyAllWindows()
