@@ -112,6 +112,10 @@ class CardIdentifier:
         if not self.templates_cache:
             return (None, 0.0)
         
+        # Converte alvo para grayscale e aplica blur para reduzir ruído
+        target_gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY)
+        target_gray = cv2.GaussianBlur(target_gray, (3, 3), 0)
+        
         best_match = None
         best_score = 0.0
         
@@ -119,14 +123,19 @@ class CardIdentifier:
         for nome_carta, templates in self.templates_cache.items():
             for template in templates:
                 try:
-                    # Redimensiona o template se necessário para corresponder ao alvo
-                    if template.shape[:2] != target_img.shape[:2]:
-                        template_resized = cv2.resize(template, (target_img.shape[1], target_img.shape[0]))
+                    # Converte template para grayscale e aplica blur
+                    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                    template_gray = cv2.GaussianBlur(template_gray, (3, 3), 0)
+                    
+                    # Redimensiona o template para corresponder EXATAMENTE ao tamanho do alvo (slot)
+                    # Isso assume que o recorte do slot contém a carta inteira
+                    if template_gray.shape[:2] != target_gray.shape[:2]:
+                        template_resized = cv2.resize(template_gray, (target_gray.shape[1], target_gray.shape[0]))
                     else:
-                        template_resized = template
+                        template_resized = template_gray
                     
                     # Usa matchTemplate com método TM_CCOEFF_NORMED (retorna 0-1)
-                    result = cv2.matchTemplate(target_img, template_resized, cv2.TM_CCOEFF_NORMED)
+                    result = cv2.matchTemplate(target_gray, template_resized, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, _ = cv2.minMaxLoc(result)
                     
                     if max_val > best_score:
