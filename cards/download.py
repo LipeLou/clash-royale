@@ -97,7 +97,7 @@ if __name__ == "__main__":
             print("Falha ao consultar a API (401 Unauthorized): verifique se o token está correto.")
         elif status == 403:
             print("Falha ao consultar a API (403 Forbidden): confirme se o token está ativo "
-                  "e se o IP desta máquina foi autorizado no portal de desenvolvedores do Clash Royale.")
+                "e se o IP desta máquina foi autorizado no portal de desenvolvedores do Clash Royale.")
         else:
             print(f"Falha ao consultar a API: {erro_http}")
     except requests.RequestException as erro_rede:

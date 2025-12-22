@@ -46,6 +46,7 @@ RED_MAX_B = 80   # Máximo de componente Azul (0-255)
 # CONFIGURAÇÃO DE IDENTIFICAÇÃO
 # ==============================================================================
 TEMPLATES_DIR = Path(__file__).parent / "cards" / "cards-templates"
+USER_TEMPLATES_DIR = Path(__file__).parent / "cards" / "cards-templates-user"
 MATCH_THRESHOLD = 0.15  # Score mínimo para considerar uma correspondência válida
 
 # ==============================================================================
@@ -58,40 +59,53 @@ ELIXIR_REGENERACAO = 0.7  # Elixir regenerado por segundo (aproximado)
 class CardIdentifier:
     """Identifica cartas comparando imagens com templates usando matchTemplate."""
     
-    def __init__(self, templates_dir: Path):
-        self.templates_dir = templates_dir
+    def __init__(self, templates_dirs: list[Path]):
+        self.templates_dirs = templates_dirs
         self.templates_cache = {}  # Cache de templates carregados
         self._load_templates()
     
     def _load_templates(self):
-        """Carrega todos os templates PNG do diretório."""
-        if not self.templates_dir.exists():
-            print(f"AVISO: Diretório de templates não encontrado: {self.templates_dir}")
-            return
+        """Carrega todos os templates PNG dos diretórios."""
+        total_loaded = 0
+        for templates_dir in self.templates_dirs:
+            if not templates_dir.exists():
+                print(f"AVISO: Diretório de templates não encontrado: {templates_dir}")
+                continue
+            
+            png_files = list(templates_dir.glob("*.png"))
+            print(f"Carregando {len(png_files)} templates de {templates_dir.name}...")
+            
+            for template_path in png_files:
+                try:
+                    template_img = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+                    if template_img is not None:
+                        # Extrai o nome da carta do nome do arquivo
+                        # Ex: "witch_medium.png" -> "Witch"
+                        # Ex: "Giant_173456789.png" -> "Giant"
+                        nome_arquivo = template_path.stem
+                        
+                        # Remove sufixos padrões
+                        nome_limpo = nome_arquivo.replace("_medium", "").replace("_evolutionMedium", "")
+                        
+                        # Remove timestamp/sufixo numérico se houver (para templates do usuário)
+                        if "_" in nome_limpo:
+                            # Divide pelo último underline se for timestamp, mas cuidado com nomes compostos
+                            # Assumindo que o timestamp é numérico no final
+                            parts = nome_limpo.rsplit("_", 1)
+                            if len(parts) > 1 and parts[1].isdigit():
+                                nome_limpo = parts[0]
+                                
+                        # Converte para formato de nome (primeira letra maiúscula)
+                        nome_carta = nome_limpo.replace("-", " ").title()
+                        
+                        if nome_carta not in self.templates_cache:
+                            self.templates_cache[nome_carta] = []
+                        self.templates_cache[nome_carta].append(template_img)
+                        total_loaded += 1
+                except Exception as e:
+                    print(f"Erro ao carregar template {template_path.name}: {e}")
         
-        png_files = list(self.templates_dir.glob("*.png"))
-        print(f"Carregando {len(png_files)} templates...")
-        
-        for template_path in png_files:
-            try:
-                template_img = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
-                if template_img is not None:
-                    # Extrai o nome da carta do nome do arquivo
-                    # Ex: "witch_medium.png" -> "Witch"
-                    nome_arquivo = template_path.stem
-                    # Remove sufixos "_medium" ou "_evolutionMedium"
-                    nome_carta = nome_arquivo.replace("_medium", "").replace("_evolutionMedium", "")
-                    # Converte para formato de nome (primeira letra maiúscula)
-                    nome_carta = nome_carta.replace("-", " ").title()
-                    
-                    # Armazena tanto medium quanto evolutionMedium com o mesmo nome base
-                    if nome_carta not in self.templates_cache:
-                        self.templates_cache[nome_carta] = []
-                    self.templates_cache[nome_carta].append(template_img)
-            except Exception as e:
-                print(f"Erro ao carregar template {template_path.name}: {e}")
-        
-        print(f"Templates carregados: {len(self.templates_cache)} cartas únicas")
+        print(f"Total de templates carregados: {total_loaded} ({len(self.templates_cache)} cartas únicas)")
     
     def identify_card(self, target_img) -> Optional[Tuple[str, float]]:
         """
@@ -262,7 +276,7 @@ class GameWatcher:
         self.slots_identity = {i: None for i in range(len(SLOTS_CONFIG))}
         
         # Inicializa o identificador de cartas
-        self.card_identifier = CardIdentifier(TEMPLATES_DIR)
+        self.card_identifier = CardIdentifier([TEMPLATES_DIR, USER_TEMPLATES_DIR])
         
         # Inicializa API e GameState
         load_dotenv()
@@ -330,7 +344,7 @@ class GameWatcher:
         h, w, _ = slot_img.shape
         roi_size = 40
         center_roi = slot_img[max(0, h//2 - roi_size):min(h, h//2 + roi_size), 
-                              max(0, w//2 - roi_size):min(w, w//2 + roi_size)]
+                            max(0, w//2 - roi_size):min(w, w//2 + roi_size)]
         
         if center_roi.size == 0: return False
         
@@ -433,39 +447,78 @@ class GameWatcher:
                         if frame_updated is not None:
                             slot_img_updated = self.get_slot_roi(frame_updated, i)
 
-                            if self.slots_identity[i] is None:
-                                # Carta desconhecida: Salvar alvo e identificar
-                                cv2.imwrite("alvo.png", slot_img_updated)
-                                print(f"[Slot {i}] Alvo salvo em 'alvo.png' para identificação...")
+                            # Tenta identificar (best guess)
+                            best_guess, best_score = self.card_identifier.get_best_guess(slot_img_updated)
+
+                            # Filtro de confiança para evitar perguntas repetitivas
+                            # Se a confiança for alta (> 50%), assume que está certo e NÃO salva duplicata.
+                            CONFIRMATION_THRESHOLD = 0.75
+
+                            if best_score >= CONFIRMATION_THRESHOLD and best_guess:
+                                print(f"[Slot {i}] Auto-identificado: {best_guess} (Confiança: {best_score:.2f} >= {CONFIRMATION_THRESHOLD})")
+                                self.slots_identity[i] = best_guess
+                                if self.game_state:
+                                    self.game_state.registrar_carta_identificada(i, best_guess)
+                            else:
+                                # --- MODO TREINAMENTO INTERATIVO (Baixa confiança) ---
+                                # Mostra o recorte para o usuário ver o que o bot está vendo
+                                cv2.imshow(f"CONFIRMACAO - Slot {i}", slot_img_updated)
+                                cv2.waitKey(100) # Atualiza janela
                                 
-                                # Identifica a carta usando matchTemplate
-                                resultado = self.card_identifier.identify_card(slot_img_updated)
+                                print(f"\n--- REVISÃO NECESSÁRIA (Slot {i}) ---")
+                                print(f"O bot identificou: '{best_guess}' (Confiança: {best_score:.2f})")
+                                print("Pressione ENTER para confirmar se estiver certo.")
+                                print("Ou digite o nome CORRETO da carta se estiver errado.")
                                 
-                                if resultado:
-                                    nome_carta, score = resultado
-                                    self.slots_identity[i] = nome_carta
-                                    print(f"[Slot {i}] ✓ Carta identificada: {nome_carta} (Score: {score:.3f})")
+                                try:
+                                    # Tenta focar na janela do console (Windows specific hack opcional, mas vamos só pedir input)
+                                    user_input = input("Sua resposta: ").strip()
+                                except EOFError:
+                                    user_input = ""
+
+                                cv2.destroyWindow(f"CONFIRMACAO - Slot {i}") # Fecha janela de recorte
+                                
+                                final_name = best_guess
+                                if user_input:
+                                    final_name = user_input
+                                    # Formata o nome para ficar bonito (Title Case)
+                                    final_name = final_name.strip().title()
+                                
+                                if final_name:
+                                    print(f"Confirmado como: {final_name}")
+                                    self.slots_identity[i] = final_name
                                     
+                                    # Salva na pasta de templates do usuário
+                                    user_templates_dir = Path(__file__).parent / "cards" / "cards-templates-user"
+                                    user_templates_dir.mkdir(exist_ok=True, parents=True)
+                                    
+                                    # Nome único com timestamp
+                                    safe_name = final_name.replace(" ", "_")
+                                    timestamp = int(time.time() * 1000)
+                                    filename = f"{safe_name}_{timestamp}.png"
+                                    save_path = user_templates_dir / filename
+                                    
+                                    try:
+                                        cv2.imwrite(str(save_path), slot_img_updated)
+                                        print(f"Imagem salva em: {save_path.name}")
+                                    except Exception as e:
+                                        print(f"Erro ao salvar imagem: {e}")
+
                                     # Registra no GameState para obter elixir
                                     if self.game_state:
-                                        self.game_state.registrar_carta_identificada(i, nome_carta)
+                                        self.game_state.registrar_carta_identificada(i, final_name)
                                 else:
-                                    # Tenta pegar o melhor palpite mesmo abaixo do threshold para debug
-                                    best_guess, best_score = self.card_identifier.get_best_guess(slot_img_updated)
-                                    print(f"[Slot {i}] ✗ Não identificado. Melhor palpite: {best_guess} (Score: {best_score:.3f}) vs Threshold {MATCH_THRESHOLD}")
-                            else:
-                                # Carta já conhecida
-                                print(f"[Slot {i}] Identificada por memória: {self.slots_identity[i]}")
+                                    print("Nenhum nome definido. Ignorando.")
 
                     # CASO: Carta jogada (Cheio -> Vazio)
                     elif previous_state == "FULL" and current_state == "EMPTY":
                         if self.slots_identity[i]:
-                             print(f"[Slot {i}] Carta JOGADA: {self.slots_identity[i]}")
-                             # Atualiza elixir no GameState
-                             if self.game_state:
-                                 self.game_state.registrar_carta_jogada(i)
+                            print(f"[Slot {i}] Carta JOGADA: {self.slots_identity[i]}")
+                            # Atualiza elixir no GameState
+                            if self.game_state:
+                                self.game_state.registrar_carta_jogada(i)
                         else:
-                             print(f"[Slot {i}] Carta jogada (Ainda não identificada)")
+                            print(f"[Slot {i}] Carta jogada (Ainda não identificada)")
 
                     # Atualiza estado
                     self.slots_status[i] = current_state
@@ -481,7 +534,7 @@ class GameWatcher:
                         elixir = self.game_state.get_elixir_atual()
                         elixir_text = f"Elixir: {elixir:.1f}"
                         cv2.putText(resized, elixir_text, (10, resized.shape[0] - 20), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
                     
                     cv2.imshow("Clash Watcher Debug", resized)
                 except Exception as e:

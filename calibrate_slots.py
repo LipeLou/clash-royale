@@ -98,7 +98,7 @@ class SlotCalibrator:
                 y = slot["top"] - self.monitor["top"]
                 cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), (0, 255, 0), 3)
                 cv2.putText(debug_frame, f"Slot {slot['id']}", (x, y-10), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
             # Desenha slot PENDENTE (Amarelo/Azul)
             if self.pending_slot:
@@ -107,9 +107,9 @@ class SlotCalibrator:
                 y = slot["top"] - self.monitor["top"]
                 cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), (0, 255, 255), 3)
                 cv2.putText(debug_frame, f"Confirmar?", (x, y-30), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
                 cv2.putText(debug_frame, f"ENTER/BACK", (x, y-10), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
             # Mostra coordenadas do mouse
             scale = 0.5
@@ -133,11 +133,11 @@ class SlotCalibrator:
             # Texto com coordenadas
             coord_text = f"X: {real_x}, Y: {real_y} | Slots marcados: {len(self.slots)}/8"
             cv2.putText(resized, coord_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             if self.pending_slot:
                 cv2.putText(resized, "CONFIRME O SLOT (ENTER / BACKSPACE)", (10, 60), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
             cv2.imshow(self.window_name, resized)
             
