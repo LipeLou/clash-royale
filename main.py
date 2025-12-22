@@ -1,7 +1,7 @@
 import os
 from collections import deque
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 class Carta:
     nome: str
     elixir: int
+    icon_url: Optional[str] = None
 
 
 class ClashRoyaleAPI:
@@ -32,9 +33,12 @@ class ClashRoyaleAPI:
         for item in payload.get("items", []):
             nome = item.get("name")
             elixir = item.get("elixirCost")
+            icon_urls = item.get("iconUrls", {})
+            icon_url = icon_urls.get("medium")
+            
             if nome is None or elixir is None:
                 continue
-            cartas.append(Carta(nome=nome, elixir=elixir))
+            cartas.append(Carta(nome=nome, elixir=elixir, icon_url=icon_url))
         return cartas
 
     def cartas_por_nomes(self, nomes: List[str]) -> List[Carta]:
