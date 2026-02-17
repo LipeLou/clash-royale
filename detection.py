@@ -3,8 +3,9 @@ import numpy as np
 import time
 import os
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Deque
 from dataclasses import dataclass
+from collections import deque
 from screen_capture import ScreenCapture
 from dashboard import Dashboard
 
@@ -143,6 +144,59 @@ class GameState:
         self.slots_info[slot_id].nome_carta = None
 
 
+class OpponentHandTracker:
+    """Rastreia mão atual (0-3) e fila/ciclo (4-7) do oponente."""
+
+    def __init__(self, game_state: GameState):
+        self.game_state = game_state
+        self.current_hand = [None, None, None, None]
+        self.queue: Deque[str] = deque()
+        self._sync_game_state()
+
+    def _sync_game_state(self):
+        # Slots 0-3: mão atual
+        for idx in range(4):
+            nome = self.current_hand[idx]
+            if nome:
+                self.game_state.registrar_carta_identificada(idx, nome)
+            else:
+                self.game_state.limpar_slot(idx)
+
+        # Slots 4-7: fila/ciclo (padded com None quando <4)
+        queue_snapshot = list(self.queue)
+        for idx in range(4):
+            slot_id = 4 + idx
+            if idx < len(queue_snapshot):
+                self.game_state.registrar_carta_identificada(slot_id, queue_snapshot[idx])
+            else:
+                self.game_state.limpar_slot(slot_id)
+
+    def register_detected_play(self, slot_id: int, detected_card: str):
+        """
+        Regras:
+        - Bootstrap: primeiras 4 detecções entram na fila em ordem.
+        - A partir da 5ª: popleft da fila -> entra na mão no slot detectado;
+          carta detectada vai para o final da fila.
+        """
+        if slot_id < 0 or slot_id > 3:
+            return
+
+        if len(self.queue) < 4:
+            self.queue.append(detected_card)
+            print(f"[Tracker] Bootstrap fila ({len(self.queue)}/4): {detected_card}")
+            self._sync_game_state()
+            return
+
+        next_card = self.queue.popleft()
+        self.current_hand[slot_id] = next_card
+        self.queue.append(detected_card)
+        print(
+            f"[Tracker] Slot {slot_id} <= {next_card} | "
+            f"jogada detectada: {detected_card} -> fim da fila"
+        )
+        self._sync_game_state()
+
+
 class GameWatcher:
     def __init__(self):
         self.capturer = ScreenCapture()
@@ -161,6 +215,7 @@ class GameWatcher:
         
         # GameState simplificado (sem API)
         self.game_state = GameState()
+        self.opponent_tracker = OpponentHandTracker(self.game_state)
 
     def capture_screen(self):
         return self.capturer.grab()
@@ -256,11 +311,11 @@ class GameWatcher:
                     color = (0, 255, 0) if current_state == "FULL" else (0, 0, 255)
                     cv2.rectangle(debug_frame, (x, y), (x+CARD_WIDTH, y+CARD_HEIGHT), color, 2)
                     
-                    label = f"S{i}: {self.slots_identity[i] or '?'}"
+                    label = f"S{i}: {self.game_state.slots_info[i].nome_carta or '?'}"
                     cv2.putText(debug_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-                    # Lógica de Transição
-                    if previous_state == "EMPTY" and current_state == "FULL":
+                    # Lógica de Transição: somente slots da mão (0-3) alteram estado interno
+                    if i <= 3 and previous_state == "EMPTY" and current_state == "FULL":
                         print(f"[Slot {i}] Nova carta detectada!")
                         time.sleep(1.5) 
                         
@@ -273,8 +328,7 @@ class GameWatcher:
 
                             if best_score >= CONFIRMATION_THRESHOLD and best_guess:
                                 print(f"[Slot {i}] Auto-identificado: {best_guess} ({best_score:.2f})")
-                                self.slots_identity[i] = best_guess
-                                self.game_state.registrar_carta_identificada(i, best_guess)
+                                self.opponent_tracker.register_detected_play(i, best_guess)
                             else:
                                 # Modo Treinamento Interativo
                                 cv2.imshow(f"CONFIRMACAO - Slot {i}", slot_img_updated)
@@ -297,7 +351,6 @@ class GameWatcher:
                                 
                                 if final_name:
                                     print(f"Confirmado: {final_name}")
-                                    self.slots_identity[i] = final_name
                                     
                                     # Salva template
                                     user_templates_dir = Path(__file__).parent / "cards" / "cards-templates-user"
@@ -313,15 +366,9 @@ class GameWatcher:
                                     except Exception as e:
                                         print(f"Erro ao salvar: {e}")
 
-                                    self.game_state.registrar_carta_identificada(i, final_name)
+                                    self.opponent_tracker.register_detected_play(i, final_name)
                                 else:
                                     print("Ignorado.")
-
-                    elif previous_state == "FULL" and current_state == "EMPTY":
-                        if self.slots_identity[i]:
-                            print(f"[Slot {i}] Carta JOGADA: {self.slots_identity[i]}")
-                            self.slots_identity[i] = None # Limpa identificação
-                            self.game_state.limpar_slot(i)
 
                     self.slots_status[i] = current_state
 
