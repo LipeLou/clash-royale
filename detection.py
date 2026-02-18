@@ -1,5 +1,6 @@
 """Deteccao em tempo real das cartas do oponente por slots fixos."""
 
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -133,6 +134,71 @@ class GameState:
         print(f"[STATE] S{slot_id}={nome_carta}")
 
 
+class OpponentHandTracker:
+    """Rastreia estimativa da mão do oponente usando ciclo FIFO simples."""
+
+    HAND_SIZE = 4
+
+    def __init__(self):
+        self.play_count = 0
+        self.queue = deque()
+        self.hand_estimate: list[str] = []
+        print("[HAND] Tracker ativo: bootstrap das primeiras 4 jogadas")
+
+    def register_play(self, card_name: str, source: str, slot_id: int) -> None:
+        """Registra jogada detectada e imprime snapshot da mão/fila."""
+        self.play_count += 1
+
+        if len(self.queue) < self.HAND_SIZE:
+            self.queue.append(card_name)
+            print(
+                f"[HAND][BOOT] {len(self.queue)}/{self.HAND_SIZE} "
+                f"| slot=S{slot_id} | fonte={source} | jogada={card_name} "
+                f"| fila_ciclo={self._format_queue()}"
+            )
+            if len(self.queue) == self.HAND_SIZE:
+                print(
+                    "[HAND][BOOT] Bootstrap concluido "
+                    f"| mao={self._format_hand()} | fila_ciclo={self._format_queue()}"
+                )
+            return
+
+        incoming_card = self.queue.popleft()
+        self.queue.append(card_name)
+        self._update_hand_estimate(played_card=card_name, incoming_card=incoming_card)
+
+        print(
+            f"[HAND] #{self.play_count:03d} | slot=S{slot_id} | fonte={source} "
+            f"| jogada={card_name} | entrou={incoming_card} "
+            f"| mao={self._format_hand()} | fila_ciclo={self._format_queue()}"
+        )
+
+    def _update_hand_estimate(self, played_card: str, incoming_card: str) -> None:
+        """Aplica transição FIFO removendo carta jogada e inserindo a que entrou."""
+        if played_card in self.hand_estimate:
+            self.hand_estimate.remove(played_card)
+
+        if incoming_card not in self.hand_estimate:
+            self.hand_estimate.append(incoming_card)
+
+        if len(self.hand_estimate) > self.HAND_SIZE:
+            self.hand_estimate = self.hand_estimate[-self.HAND_SIZE :]
+
+    def _format_queue(self) -> str:
+        """Retorna fila com tamanho fixo para exibição."""
+        queue_snapshot = list(self.queue)[: self.HAND_SIZE]
+        while len(queue_snapshot) < self.HAND_SIZE:
+            queue_snapshot.append("?")
+        return "[" + ", ".join(queue_snapshot) + "]"
+
+    def _format_hand(self) -> str:
+        """Retorna mão estimada com tamanho fixo para exibição."""
+        hand_snapshot: list[str] = list(self.hand_estimate)[: self.HAND_SIZE]
+        while len(hand_snapshot) < self.HAND_SIZE:
+            hand_snapshot.append("?")
+        return "[" + ", ".join(hand_snapshot) + "]"
+
+
 class GameWatcher:
     """Monitora os slots em tempo real e identifica cartas por memoria fixa."""
 
@@ -143,6 +209,7 @@ class GameWatcher:
         self.slots_identity: Dict[int, Optional[str]] = {i: None for i in range(len(SLOTS_CONFIG))}
         self.card_identifier = CardIdentifier([TEMPLATES_DIR, USER_TEMPLATES_DIR])
         self.game_state = GameState()
+        self.opponent_tracker = OpponentHandTracker()
 
     def capture_screen(self) -> Optional[np.ndarray]:
         """Captura o frame atual da tela."""
@@ -270,12 +337,14 @@ class GameWatcher:
         known_card = self.slots_identity[slot_id]
         if known_card:
             self._log_play_event(slot_id, known_card, "MEMORIA")
+            self.opponent_tracker.register_play(known_card, "MEMORIA", slot_id)
             return
 
         identified_card, source = self._identify_unknown_slot(slot_id)
         if identified_card:
             self._register_slot_identity(slot_id, identified_card)
             self._log_play_event(slot_id, identified_card, source)
+            self.opponent_tracker.register_play(identified_card, source, slot_id)
 
     def run(self) -> None:
         """Executa o loop principal de monitoramento dos slots."""
