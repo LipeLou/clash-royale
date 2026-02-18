@@ -1,94 +1,87 @@
-import platform
-import numpy as np
+"""Camada de captura de tela com fallback entre diferentes backends."""
+
+import subprocess
+
 import cv2
 import mss
+import numpy as np
 from PIL import ImageGrab
-import subprocess
-import os
+
 
 class ScreenCapture:
-    def __init__(self, monitor_index=1):
-        self.system = platform.system()
-        self.monitor_index = monitor_index
+    """Fornece captura de tela em BGR para processamento com OpenCV."""
+
+    def __init__(self, monitor_index: int = 1):
         self.sct = None
         self.backend = None
-        # Valor padrão seguro
         self.monitor_info = {"top": 0, "left": 0, "width": 1920, "height": 1080}
-        
-        print("[ScreenCapture] Inicializando sistema de captura...")
 
-        # 1. Tenta MSS (Melhor Performance - Windows/Linux X11)
+        print("[CAPTURE][INIT] Inicializando sistema de captura")
+
         try:
             self.sct = mss.mss()
             if len(self.sct.monitors) > monitor_index:
                 self.monitor = self.sct.monitors[monitor_index]
             else:
                 self.monitor = self.sct.monitors[0]
-            
-            # Teste real de captura
+
             self.sct.grab(self.monitor)
             self.backend = "mss"
-            print(f"[ScreenCapture] ✓ Backend MSS ativo.")
-            return 
-        except Exception as e:
-            print(f"[ScreenCapture] ✗ MSS falhou: {e}")
+            print("[CAPTURE][OK] Backend selecionado: MSS")
+            return
+        except Exception as exc:
+            print(f"[CAPTURE][WARN] MSS indisponivel: {exc}")
             self.sct = None
 
-        # 2. Tenta PIL ImageGrab (Compatível X11/Alguns Wayland)
         try:
             img = ImageGrab.grab()
-            # Apenas acessa propriedades para forçar erro se não funcionar
-            w, h = img.size
+            width, height = img.size
             self.backend = "pil"
-            self.monitor_info = {"top": 0, "left": 0, "width": w, "height": h}
-            print(f"[ScreenCapture] ✓ Backend PIL ativo.")
-            return 
-        except Exception as e:
-            print(f"[ScreenCapture] ✗ PIL falhou: {e}")
-
-        # 3. Tenta Gnome Screenshot (Wayland Fallback - Lento)
-        try:
-            # Verifica se comando existe
-            subprocess.run(["gnome-screenshot", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            self.backend = "gnome"
-            print(f"[ScreenCapture] ✓ Backend Gnome Screenshot ativo (AVISO: Lento!).")
-            # Não conseguimos pegar resolução fácil aqui, mantemos padrão HD
+            self.monitor_info = {"top": 0, "left": 0, "width": width, "height": height}
+            print("[CAPTURE][OK] Backend selecionado: PIL")
             return
-        except Exception as e:
-            print(f"[ScreenCapture] ✗ Gnome Screenshot falhou/não instalado: {e}")
+        except Exception as exc:
+            print(f"[CAPTURE][WARN] PIL indisponivel: {exc}")
 
-        print("\n[ScreenCapture] ERRO FATAL: Nenhum método de captura funcionou.")
-        print("DICA: Se estiver no Linux Wayland, tente logar na sessão 'Ubuntu on Xorg'.")
-        # Não lança erro aqui para permitir que o usuário veja a mensagem, 
-        # mas o método grab() vai falhar.
+        try:
+            subprocess.run(
+                ["gnome-screenshot", "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+            self.backend = "gnome"
+            print("[CAPTURE][OK] Backend selecionado: GNOME_SCREENSHOT (lento)")
+            return
+        except Exception as exc:
+            print(f"[CAPTURE][WARN] GNOME_SCREENSHOT indisponivel: {exc}")
+
+        print("[CAPTURE][ERROR] Nenhum metodo de captura funcionou")
+        print("[CAPTURE][HINT] Em Linux Wayland, tente uma sessao X11")
         self.backend = "none"
 
-    def grab(self):
-        """Captura a tela e retorna imagem BGR (OpenCV)."""
+    def grab(self) -> np.ndarray | None:
+        """Captura a tela e retorna um frame BGR."""
         try:
             if self.backend == "mss":
                 sct_img = self.sct.grab(self.monitor)
                 return cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
-            
-            elif self.backend == "pil":
+
+            if self.backend == "pil":
                 img = ImageGrab.grab()
                 return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-            elif self.backend == "gnome":
-                # Método lento: salva em arquivo temporário e lê
+            if self.backend == "gnome":
                 filename = "/tmp/clash_screen_capture.png"
                 subprocess.run(["gnome-screenshot", "-f", filename], check=True)
-                img = cv2.imread(filename)
-                return img
-                
-        except Exception as e:
-            # Evita spammar erro no loop
-            # print(f"Erro captura: {e}")
+                return cv2.imread(filename)
+        except Exception:
             pass
-        
+
         return None
 
-    def get_monitor_info(self):
+    def get_monitor_info(self) -> dict:
+        """Retorna as dimensoes do monitor de captura ativo."""
         if self.backend == "mss":
             return self.monitor
         return self.monitor_info
