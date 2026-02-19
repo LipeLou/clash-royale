@@ -1,4 +1,4 @@
-# Clash Royale Opponent Tracker
+# Clash Royale Opponent Hand Tracker
 
 Ferramenta em Python para identificar cartas do oponente em tempo real, usando visão computacional sobre slots fixos da interface do jogo.
 
